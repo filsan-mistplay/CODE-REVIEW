@@ -1,7 +1,6 @@
 WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest
 SELECT DISTINCT user_id AS uid
       ,le.name AS event_type
-      ,MIN(from_unixtime(time/1000)) AS time
       ,abtest.variant_id AS variant_id
       ,abtest.name AS ab_test_name
       ,variant_name AS test_control
@@ -11,12 +10,10 @@ LEFT JOIN de_external_sources.leanplum_abtest AS ab ON le.abtest.variant_id = ab
 WHERE (UPPER(abtest.name) LIKE '%C340%'
 OR UPPER(message.campaign_name) LIKE '%C340%')
 AND (abtest.name LIKE '%In-App%'
-OR message.campaign_name LIKE '%In-App%')
-GROUP BY 1,2,4,5,6,7)
+OR message.campaign_name LIKE '%In-App%'))
 
 ,control AS(
 SELECT events.uid
-      ,time AS start_time
       ,'CONTROL' AS test_control
 FROM events
 LEFT JOIN mistplayetl.users ON events.uid = users.uid
@@ -29,7 +26,6 @@ AND (isdev IS NULL OR isdev = false)) -- account type is not a dev account
 
 ,test AS(
 SELECT events.uid
-      ,time AS start_time
       ,'VARIANT'AS test_control
 FROM events
 LEFT JOIN mistplayetl.users ON events.uid = users.uid
@@ -38,8 +34,7 @@ AND test_control LIKE '%Enabled%' -- restricts to variant group users
 AND abt > 3 -- ab group restriction
 AND b_reason IS NULL -- user is not banned
 AND (isdev IS NULL OR isdev = false) -- account type is not a dev account
-AND events.uid NOT IN (SELECT uid FROM control) -- user is not in control group
-GROUP BY 1,2,3)
+AND events.uid NOT IN (SELECT uid FROM control)) -- user is not in control group
 
 ,ab_groups AS(
 (SELECT * FROM control)
@@ -50,8 +45,6 @@ UNION
 SELECT ab_groups.uid
       ,test_control
       ,contest_id
-      ,date(from_unixtime(start/1000)) as start_date
-      ,date(from_unixtime("end"/1000)) as end_date
       ,join_ts
       ,entered_ts
 FROM ab_groups
@@ -63,7 +56,7 @@ SELECT contest_id
       ,test_control
       ,COUNT(distinct uid) AS num_users_table
       ,SUM(CASE WHEN join_ts IS NOT NULL THEN 1 ELSE 0 END) AS num_joined
-      ,sum(CASE WHEN entered_ts IS NOT NULL THEN 1 else 0 END) AS num_entered
+      ,SUM(CASE WHEN entered_ts IS NOT NULL THEN 1 else 0 END) AS num_entered
 FROM contests
 GROUP BY 1,2
 ORDER BY 1 DESC, 2 ASC
