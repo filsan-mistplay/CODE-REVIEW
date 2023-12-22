@@ -1,5 +1,95 @@
---PART 2a: Metric Calculation (PN Campaign)
+-- PART 1a: Engagement Metrics (PN Campaign + Email)
+Note: This only included engagement metrics PN Campaign and Email, as both were sent on October, expecting users to redeem by October 31, 2023 (exluding PN Campaign 2 which was sent to users during November and ended on November 30, 2023.)
+WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest																									
+SELECT DISTINCT user_id AS uid																									
+      ,le.name AS event_type																									
+      ,MIN(from_unixtime(time/1000)) AS time																									
+      ,message.campaign_name AS message																									
+      ,campaign.name AS campaign																									
+FROM de_external_sources.leanplum_events AS le																									
+WHERE(message.campaign_name LIKE '%E265%'																									
+OR campaign.name LIKE '%E265%')																									
+AND (message.campaign_name NOT LIKE '%E265 – ASPU – Google Play 10% Discount (C188 Re-Run) - PN Campaign 2%'																									
+OR campaign.name NOT LIKE '%E265 – ASPU – Google Play 10% Discount (C188 Re-Run) - PN Campaign 2%')																									
+GROUP BY 1,2,4,5)																									
+																									
+SELECT 'ENGAGEMENT_STATS' AS label																									
+      ,COUNT(DISTINCT uid) AS targeted_users																									
+      ,COUNT(DISTINCT CASE WHEN event_type LIKE '%Push Notification Send%' THEN uid ELSE NULL END) AS pn_sent																									
+      ,COUNT(DISTINCT CASE WHEN event_type LIKE '%Email Send%' THEN uid ELSE NULL END) AS email_sent																									
+      ,COUNT(DISTINCT CASE WHEN event_type LIKE '%Email Delivered%' THEN uid ELSE NULL END) AS email_delivered																									
+      ,COUNT(DISTINCT CASE WHEN event_type LIKE '%Email Open%' THEN uid ELSE NULL END) AS email_opened																									
+FROM events			
 
+-- PART 1b: Engagement Metrics (PN Campaign + Email)
+Note: This only included engagement metrics PN Campaign and Email, as both were sent on October, expecting users to redeem by October 31, 2023 (exluding PN Campaign 2 which was sent to users during November and ended on November 30, 2023.)
+WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest
+SELECT DISTINCT user_id AS uid
+      ,name AS event_type
+      ,from_unixtime(time/1000) AS time
+      ,campaign.name AS campaign
+      ,message.campaign_name AS message
+FROM de_external_sources.leanplum_events
+WHERE (message.campaign_name LIKE '%E265%'
+OR campaign.name LIKE '%E265%'))
+
+,email_opened AS(
+SELECT DISTINCT events.uid
+      ,MIN(date(time)) AS start_time
+      ,'EMAIL' AS test_control
+FROM events
+WHERE event_type LIKE '%Email Open%'
+GROUP BY 1,3)
+
+,test_1 AS(
+SELECT DISTINCT events.uid
+      ,MIN(date(time)) AS start_time
+      ,'PN' AS test_control
+FROM events
+WHERE (message LIKE '%E265 – ASPU – Google Play 10% Discount (C188 Re-Run) - PN Campaign%'
+OR campaign LIKE '%E265 – ASPU – Google Play 10% Discount (C188 Re-Run) - PN Campaign%')
+AND (message NOT LIKE '%PN Campaign 2%'
+OR campaign NOT LIKE '%PN Campaign 2%')
+AND event_type LIKE '%Push Notification Send%'
+AND uid NOT IN (SELECT uid FROM email_opened)
+GROUP BY 1,3)
+
+,test_2 AS(
+SELECT DISTINCT events.uid
+      ,MIN(date(time)) AS start_time
+      ,'PN' AS test_control
+FROM events
+WHERE (message LIKE '%E265 – ASPU – Google Play 20% Discount (C188 Re-Run) - PN Campaign%'
+OR campaign LIKE '%E265 – ASPU – Google Play 20% Discount (C188 Re-Run) - PN Campaign%')
+AND (message NOT LIKE '%PN Campaign 2%'
+OR campaign NOT LIKE '%PN Campaign 2%')
+AND event_type LIKE '%Push Notification Send%'
+-- AND uid NOT IN (SELECT uid FROM email_opened)
+GROUP BY 1,3)
+
+,ab_groups AS(
+(SELECT * FROM email_opened)
+UNION
+(SELECT * FROM test_1)
+UNION
+(SELECT * FROM test_2))
+
+,gc_redeem AS(
+SELECT test_control
+,COUNT(DISTINCT CASE WHEN brand LIKE '%Google%' AND sku LIKE '%U732791%' OR sku LIKE '%U713491%' THEN oid END) AS total_gc_google
+FROM ab_groups
+LEFT JOIN mistplayetl.purchases ON ab_groups.uid = purchases.uid
+WHERE purchases.createdat  BETWEEN date(start_time) AND date('2023-10-31')
+GROUP BY 1)
+
+SELECT test_control
+,total_gc_google
+FROM gc_redeem
+ORDER BY 1
+
+
+--PART 2a: Performance Metrics (PN Campaign)
+Note: This is for the Push Notification sent between Oct. 7, 2023 and Oct. 22, 2023
 WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest
 SELECT DISTINCT user_id AS uid
       ,name AS event_type
@@ -23,7 +113,7 @@ AND UPPER(lctr) IN ('US')
 AND b_reason IS NULL -- user is not banned
 AND (isdev IS NULL OR isdev = false))-- account type is not a dev account
 
-,test_1 AS(
+,test_1 AS( -- users receiving 10% google play discount (Variant 1)
 SELECT DISTINCT events.uid
       ,date(time) AS start_time
       ,'VARIANT_1' AS test_control
@@ -38,7 +128,7 @@ OR campaign LIKE '%E265 – ASPU – Google Play 10% Discount (C188 Re-Run) - PN
 AND (message NOT LIKE '%PN Campaign 2%'
 OR campaign NOT LIKE '%PN Campaign 2%'))
 
-,test_2 AS(
+,test_2 AS( -- users receiving 20% google play discount (Variant 2)
 SELECT DISTINCT events.uid
       ,date(time) AS start_time
       ,'VARIANT_2' AS test_control
@@ -63,9 +153,11 @@ UNION
 ,spend AS( --table consisting of the aggregations for dx_iap (in-app purchases)
 SELECT ag.test_control
       ,COUNT(DISTINCT ag.uid) AS no_users
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '0' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 0 THEN amount ELSE 0 END) AS d0_iap
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) AS d1_iap
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) AS d3_iap
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 7 THEN amount ELSE 0 END) AS d7_iap
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '0' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 0 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d0_aspu
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d1_aspu
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d3_aspu
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 7 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d7_aspu
@@ -76,6 +168,7 @@ GROUP BY 1)
 ,retention AS(
 SELECT ag.test_control
       ,ag.uid
+      ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '0' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 0 THEN 1 ELSE 0 END) AS d0_ret
       ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 1 THEN 1 ELSE 0 END) AS d1_ret
       ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 3 THEN 1 ELSE 0 END) AS d3_ret
       ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 7 THEN 1 ELSE 0 END) AS d7_ret
@@ -85,14 +178,18 @@ GROUP BY 1,2)
 
 ,gc_redeem AS(
 SELECT test_control
-      ,COUNT(DISTINCT CASE WHEN brand LIKE '%Google%' THEN oid END) AS total_gc_google
+      ,COUNT(DISTINCT CASE WHEN test_control LIKE '%VARIANT_1%' AND brand LIKE '%Google%' AND sku LIKE '%U713491%' THEN oid
+             WHEN test_control LIKE '%VARIANT_2%' AND brand LIKE '%Google%' AND sku LIKE '%U732791%' THEN oid
+             WHEN test_control LIKE '%CONTROL%' AND brand LIKE '%Google%' THEN oid
+             ELSE NULL END) AS total_gc_google
 FROM ab_groups
 LEFT JOIN mistplayetl.purchases ON ab_groups.uid = purchases.uid
-WHERE purchases.createdat  BETWEEN date(start_time) AND date('2023-10-31')
+WHERE purchases.createdat  BETWEEN date(start_time) AND date('2023-11-30')
 GROUP BY 1)
 
 ,mistplay_ret AS(
 SELECT test_control,
+AVG(d0_ret) AS d0_ret,
 AVG(d1_ret) AS d1_ret,
 AVG(d3_ret) AS d3_ret,
 AVG(d7_ret) AS d7_ret
@@ -101,12 +198,15 @@ GROUP BY 1)
 
 SELECT spend.test_control
       ,spend.no_users
+      ,d0_iap
       ,d1_iap
       ,d3_iap
       ,d7_iap
+      ,d0_aspu
       ,d1_aspu
       ,d3_aspu
       ,d7_aspu
+      ,d0_ret
       ,d1_ret
       ,d3_ret
       ,d7_ret
@@ -116,8 +216,8 @@ LEFT JOIN mistplay_ret ON spend.test_control = mistplay_ret.test_control
 LEFT JOIN gc_redeem ON spend.test_control = gc_redeem.test_control
 ORDER BY 1
 
---PART 2b: Metric Calculation (PN Campaign 2)
-
+--PART 2b: Performance Metrics (PN Campaign 2)
+Note: This is for the Push Notification sent between Nov. 22, 2023 and Nov. 27, 2023
 WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest
 SELECT DISTINCT user_id AS uid
       ,name AS event_type
@@ -141,7 +241,7 @@ AND UPPER(lctr) IN ('US')
 AND b_reason IS NULL -- user is not banned
 AND (isdev IS NULL OR isdev = false))-- account type is not a dev account
 
-,test_1 AS(
+,test_1 AS( -- users receiving 10% google play discount (Variant 1)
 SELECT DISTINCT events.uid
       ,date(time) AS start_time
       ,'VARIANT_1' AS test_control
@@ -154,7 +254,7 @@ AND (isdev IS NULL OR isdev = false) -- account type is not a dev account
 AND (message LIKE '%E265 – ASPU – Google Play 10% Discount (C188 Re-Run) - PN Campaign 2%'
 OR campaign LIKE '%E265 – ASPU – Google Play 10% Discount (C188 Re-Run) - PN Campaign 2%'))
 
-,test_2 AS(
+,test_2 AS( -- users receiving 20% google play discount (Variant 1)
 SELECT DISTINCT events.uid
       ,date(time) AS start_time
       ,'VARIANT_2' AS test_control
@@ -177,9 +277,11 @@ UNION
 ,spend AS( --table consisting of the aggregations for dx_iap (in-app purchases)
 SELECT ag.test_control
       ,COUNT(DISTINCT ag.uid) AS no_users
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '0' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 0 THEN amount ELSE 0 END) AS d0_iap
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) AS d1_iap
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) AS d3_iap
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 7 THEN amount ELSE 0 END) AS d7_iap
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '0' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 0 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d0_aspu
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d1_aspu
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d3_aspu
       ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 7 THEN amount ELSE 0 END) / COUNT(DISTINCT ag.uid) AS d7_aspu
@@ -190,6 +292,7 @@ GROUP BY 1)
 ,retention AS(
 SELECT ag.test_control
       ,ag.uid
+      ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '0' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 0 THEN 1 ELSE 0 END) AS d0_ret
       ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 1 THEN 1 ELSE 0 END) AS d1_ret
       ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 3 THEN 1 ELSE 0 END) AS d3_ret
       ,MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 7 THEN 1 ELSE 0 END) AS d7_ret
@@ -199,7 +302,10 @@ GROUP BY 1,2)
 
 ,gc_redeem AS(
 SELECT test_control
-      ,COUNT(DISTINCT CASE WHEN brand LIKE '%Google%' THEN oid END) AS total_gc_google
+      ,COUNT(DISTINCT CASE WHEN test_control LIKE '%VARIANT_1%' AND brand LIKE '%Google%' AND sku LIKE '%U713491%' THEN oid
+             WHEN test_control LIKE '%VARIANT_2%' AND brand LIKE '%Google%' AND sku LIKE '%U732791%' THEN oid
+             WHEN test_control LIKE '%CONTROL%' AND brand LIKE '%Google%' THEN oid
+             ELSE NULL END) AS total_gc_google
 FROM ab_groups
 LEFT JOIN mistplayetl.purchases ON ab_groups.uid = purchases.uid
 WHERE purchases.createdat  BETWEEN date(start_time) AND date('2023-11-30')
@@ -207,6 +313,7 @@ GROUP BY 1)
 
 ,mistplay_ret AS(
 SELECT test_control,
+AVG(d0_ret) AS d0_ret,
 AVG(d1_ret) AS d1_ret,
 AVG(d3_ret) AS d3_ret,
 AVG(d7_ret) AS d7_ret
@@ -215,12 +322,15 @@ GROUP BY 1)
 
 SELECT spend.test_control
       ,spend.no_users
+      ,d0_iap
       ,d1_iap
       ,d3_iap
       ,d7_iap
+      ,d0_aspu
       ,d1_aspu
       ,d3_aspu
       ,d7_aspu
+      ,d0_ret
       ,d1_ret
       ,d3_ret
       ,d7_ret
