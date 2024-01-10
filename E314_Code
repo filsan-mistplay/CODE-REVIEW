@@ -1,0 +1,144 @@
+-- PART 1: ENGAGEMENT METRICS
+
+SELECT 'ENGAGEMENT_STATS' AS label
+      ,COUNT(DISTINCT CASE WHEN abtest.name LIKE '%Holdback%' AND variant_name LIKE '%Enabled%' THEN user_id ELSE NULL END) AS targeted_users
+      ,COUNT(DISTINCT CASE WHEN le.name LIKE '%Email Send%' THEN user_id ELSE NULL END) AS email_sent
+      ,COUNT(DISTINCT CASE WHEN le.name LIKE '%Email Delivered%' THEN user_id ELSE NULL END) AS email_delivered
+      ,COUNT(DISTINCT CASE WHEN le.name LIKE '%Email Open%' THEN user_id ELSE NULL END) AS email_opened
+FROM de_external_sources.leanplum_events AS le
+LEFT JOIN de_external_sources.leanplum_abtest AS ab ON le.abtest.variant_id = ab.variant_id
+WHERE (abtest.name LIKE '%E314%'
+OR message.campaign_name LIKE '%E314%')
+
+-- PART 2: PERFORMANCE METRICS
+
+WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest
+SELECT DISTINCT user_id AS uid
+      ,le.name AS event_type
+      ,MIN(from_unixtime(time/1000)) AS time
+      ,abtest.variant_id AS variant_id
+      ,abtest.name AS ab_test_name
+      ,variant_name AS test_control
+      ,message.campaign_name AS campaign_name
+FROM de_external_sources.leanplum_events AS le
+LEFT JOIN de_external_sources.leanplum_abtest AS ab ON le.abtest.variant_id = ab.variant_id
+WHERE (abtest.name LIKE '%E314%'
+OR message.campaign_name LIKE '%E314%')
+GROUP BY 1,2,4,5,6,7)
+
+,control AS(
+SELECT events.uid
+      ,time AS start_time
+      ,'CONTROL' AS test_control
+FROM events
+LEFT JOIN mistplayetl.users ON events.uid = users.uid
+WHERE ab_test_name LIKE '%Holdback%'
+AND test_control LIKE '%Control%'-- restricts to control group users
+AND abt > 3-- ab group restriction
+AND subs = true -- user is subscribed to the newsletter
+AND b_reason IS NULL -- user is not banned
+AND (isdev IS NULL OR isdev = false) -- account type is not a dev account
+AND events.uid NOT IN ('b5673515-3c08-4034-b1fc-e6317585541b', '00d44f8e-df47-4bd6-a9c0-37b9d7b04f14',
+'cf3b97ad-6c26-45c3-bf11-9c929ccd16b7','4b9aa4f1-2576-409d-aa30-2462db6a21fe')) -- manually excluding control users that were able to make redemptions for this eventid
+
+,test AS(
+SELECT events.uid
+      ,time AS start_time
+      ,'VARIANT'AS test_control
+FROM events
+LEFT JOIN mistplayetl.users ON events.uid = users.uid
+WHERE ab_test_name LIKE '%Holdback%'
+AND test_control LIKE '%Enabled%' -- restricts to variant group users
+AND abt > 3 -- ab group restriction
+AND subs = true  -- user is subscribed to the newsletter
+AND b_reason IS NULL -- user is not banned
+AND (isdev IS NULL OR isdev = false)) -- account type is not a dev account
+
+,ab_groups AS(
+(SELECT * FROM control)
+UNION
+(SELECT * FROM test))
+
+,redeems AS(
+SELECT ab_groups.test_control
+      ,COUNT(DISTINCT ab_groups.uid) as redeems
+FROM ab_groups
+LEFT JOIN mistplayetl.unitledgers ON ab_groups.uid = unitledgers.uid
+WHERE amount = 100
+AND eventid LIKE'%E314%'
+AND date(from_unixtime(ts/1000)) BETWEEN date(start_time) AND date('2023-12-04')
+GROUP BY 1)
+
+,spend AS( --table consisting of the aggregations for dx_iap (in-app purchases), and dx_aspu (average spend per user)
+SELECT ab_groups.test_control
+      ,COUNT(DISTINCT ab_groups.uid) AS no_users
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) AS d1_iap
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '2' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 2 THEN amount ELSE 0 END) AS d2_iap
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) AS d3_iap
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) / COUNT(DISTINCT ab_groups.uid) AS d1_aspu
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '2' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 2 THEN amount ELSE 0 END) / COUNT(DISTINCT ab_groups.uid) AS d2_aspu
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) / COUNT(DISTINCT ab_groups.uid) AS d3_aspu
+FROM ab_groups
+LEFT JOIN mistplayetl.inapppurchases ON ab_groups.uid = inapppurchases.uid
+GROUP BY 1)
+
+,installs AS( --table consisting of the aggregations for dx_installs (installs)
+SELECT test_control
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(installs.createdat)) BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS d1_installs
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '2' day THEN NULL WHEN Date_diff('day', date(start_time), date(installs.createdat)) BETWEEN 0 AND 2 THEN 1 ELSE 0 END) AS d2_installs
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(installs.createdat)) BETWEEN 0 AND 3 THEN 1 ELSE 0 END) AS d3_installs
+FROM ab_groups
+LEFT JOIN mistplayetl.installs ON ab_groups.uid = installs.uid AND state = 2
+GROUP BY 1)
+
+,playtime AS( --table consisting of the aggregations for dx_playtime from gxphistory table
+SELECT test_control
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 1 THEN floor(time/60000) % 60 ELSE 0 END) AS d1_playtime
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '2' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 2 THEN floor(time/60000) % 60 ELSE 0 END) AS d2_playtime
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 3 THEN floor(time/60000) % 60 ELSE 0 END) AS d3_playtime
+FROM ab_groups
+LEFT JOIN mistplayetl.gxphistory ON ab_groups.uid = gxphistory.uid
+GROUP BY 1)
+
+,retention AS(
+SELECT ab_groups.test_control
+      ,ab_groups.uid
+      ,1.00*MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 1 THEN 1 ELSE 0 END) AS d1_ret
+      ,1.00*MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '2' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 2 THEN 1 ELSE 0 END) AS d2_ret
+      ,1.00*MAX(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(activity_date)) = 3 THEN 1 ELSE 0 END) AS d3_ret
+FROM ab_groups
+LEFT JOIN mistplayetl.user_cohort_activity ON ab_groups.uid = user_cohort_activity.uid
+GROUP BY 1,2)
+
+,mistplay_ret AS(
+SELECT test_control
+      ,AVG(d1_ret) AS d1_ret
+      ,AVG(d2_ret) AS d2_ret
+      ,AVG(d3_ret) AS d3_ret
+FROM retention
+GROUP BY 1)
+
+SELECT spend.test_control
+      ,spend.no_users
+      ,redeems
+      ,d1_ret
+      ,d2_ret
+      ,d3_ret
+      ,d1_playtime
+      ,d2_playtime
+      ,d3_playtime
+      ,d1_iap
+      ,d2_iap
+      ,d3_iap
+      ,d1_aspu
+      ,d2_aspu
+      ,d3_aspu
+      ,d1_installs
+      ,d2_installs
+      ,d3_installs
+FROM spend
+LEFT JOIN mistplay_ret ON spend.test_control = mistplay_ret.test_control
+LEFT JOIN playtime ON spend.test_control = playtime.test_control
+LEFT JOIN installs ON spend.test_control = installs.test_control
+LEFT JOIN redeems ON spend.test_control = redeems.test_control
+ORDER BY 1
