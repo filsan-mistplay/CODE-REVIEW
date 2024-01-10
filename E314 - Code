@@ -93,9 +93,9 @@ GROUP BY 1)
 
 ,playtime AS( --table consisting of the aggregations for dx_playtime from gxphistory table
 SELECT test_control
-      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 1 THEN floor(time/60000) % 60 ELSE 0 END) AS d1_playtime
-      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '2' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 2 THEN floor(time/60000) % 60 ELSE 0 END) AS d2_playtime
-      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 3 THEN floor(time/60000) % 60 ELSE 0 END) AS d3_playtime
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 1 THEN floor(time/60000) ELSE 0 END) AS d1_playtime
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '2' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 2 THEN floor(time/60000) ELSE 0 END) AS d2_playtime
+      ,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(gxphistory.date)) BETWEEN 0 AND 3 THEN floor(time/60000) ELSE 0 END) AS d3_playtime
 FROM ab_groups
 LEFT JOIN mistplayetl.gxphistory ON ab_groups.uid = gxphistory.uid
 GROUP BY 1)
