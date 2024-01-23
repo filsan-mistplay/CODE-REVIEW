@@ -1,0 +1,958 @@
+--PART 1: Engagement Metrics																									
+																									
+WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest																									
+SELECT DISTINCT user_id AS uid																									
+,le.name AS event_type																									
+,MIN(from_unixtime(time/1000)) AS time																									
+,abtest.variant_id AS variant_id																									
+,abtest.name AS ab_test_name																									
+,variant_name AS test_control																									
+,message.campaign_name AS campaign_name																									
+FROM de_external_sources.leanplum_events AS le																									
+LEFT JOIN de_external_sources.leanplum_abtest AS ab ON le.abtest.variant_id = ab.variant_id																									
+WHERE (abtest.name LIKE '%E367%'																									
+OR message.campaign_name LIKE '%E367%')																									
+AND (abtest.name NOT LIKE '%Spend $0.99 - 3%'																									
+OR message.campaign_name NOT LIKE '%Spend $0.99 - 3%'																									
+OR campaign.name NOT LIKE '%Spend $0.99 - 3%')																									
+GROUP BY 1,2,4,5,6,7)																									
+																									
+,usd AS(																									
+SELECT 'VARIANT_1' AS label																									
+,COUNT(DISTINCT uid) AS targeted_users																									
+,COUNT(DISTINCT CASE WHEN confirmationtype LIKE '%POSITIVE%' THEN uid ELSE NULL END) AS opt_in																									
+,COUNT(DISTINCT CASE WHEN completed = true THEN uid ELSE NULL END) AS completed																									
+,100.0*COUNT(DISTINCT CASE WHEN confirmationtype LIKE '%POSITIVE%' THEN uid ELSE NULL END) / COUNT(DISTINCT uid) AS opt_in_rate																									
+,100.0*COUNT(DISTINCT CASE WHEN completed = true THEN uid ELSE NULL END) / COUNT(DISTINCT uid) AS completion_rate																									
+FROM mistplayetl.liveopevents																									
+WHERE scheduledeventid LIKE '%E367%'																									
+AND scheduledeventid LIKE '%USD%'																									
+AND uid IN (SELECT uid FROM events))																									
+																									
+,local AS(																									
+SELECT 'VARIANT_2' AS label																									
+,COUNT(DISTINCT uid) AS targeted_users																									
+,COUNT(DISTINCT CASE WHEN confirmationtype LIKE '%POSITIVE%' THEN uid ELSE NULL END) AS opt_in																									
+,COUNT(DISTINCT CASE WHEN completed = true THEN uid ELSE NULL END) AS completed																									
+,100.0*COUNT(DISTINCT CASE WHEN confirmationtype LIKE '%POSITIVE%' THEN uid ELSE NULL END) / COUNT(DISTINCT uid) AS opt_in_rate																									
+,100.0*COUNT(DISTINCT CASE WHEN completed = true THEN uid ELSE NULL END) / COUNT(DISTINCT uid) AS completion_rate																									
+FROM mistplayetl.liveopevents																									
+WHERE scheduledeventid LIKE '%E367%'																									
+AND scheduledeventid NOT LIKE '%USD%'																									
+AND uid IN (SELECT uid FROM events))																									
+																									
+(select * from usd)																									
+union																									
+(select * from local)																									
+																									
+--PART 2: Performance Metrics																									
+																									
+WITH events AS(-- table combines all the information for experiment from lp events and adds variant info from the lp abtest																									
+SELECT DISTINCT user_id AS uid																									
+,le.name AS event_type																									
+,MIN(from_unixtime(time/1000)) AS time																									
+,abtest.variant_id AS variant_id																									
+,abtest.name AS ab_test_name																									
+,variant_name AS test_control																									
+,message.campaign_name AS campaign_name																									
+FROM de_external_sources.leanplum_events AS le																									
+LEFT JOIN de_external_sources.leanplum_abtest AS ab ON le.abtest.variant_id = ab.variant_id																									
+WHERE (abtest.name LIKE '%E367%'																									
+OR message.campaign_name LIKE '%E367%')																									
+AND (abtest.name NOT LIKE '%Spend $0.99 - 2%'																									
+OR message.campaign_name NOT LIKE '%Spend $0.99 - 2%') -- user did not receive PN 2																									
+AND (abtest.name NOT LIKE '%Spend $0.99 - 3%'																									
+OR message.campaign_name NOT LIKE '%Spend $0.99 - 3%') -- user did not receive PN 3																									
+GROUP BY 1,2,4,5,6,7)																									
+																									
+,control AS(																									
+SELECT events.uid																									
+,date(time) AS start_time																									
+,'CONTROL' AS test_control																									
+FROM events																									
+LEFT JOIN mistplayetl.users ON events.uid = users.uid																									
+WHERE ab_test_name LIKE '%Holdback%'																									
+AND test_control LIKE '%Control%'-- restricts to control group users																									
+AND abt > 3-- ab group restriction																									
+AND b_reason IS NULL -- user is not banned																									
+AND (isdev IS NULL OR isdev = false)) -- account type is not a dev account																									
+																									
+,variants AS(																									
+SELECT events.*																									
+FROM events																									
+WHERE ab_test_name LIKE '%Holdback%' -- restricts to variant group users																									
+AND test_control LIKE '%Enabled%')																									
+																									
+,test_1 AS( -- USD currency																									
+SELECT events.uid																									
+,date(time) AS start_time																									
+,'VARIANT_1'AS test_control																									
+FROM events																									
+LEFT JOIN mistplayetl.users ON events.uid = users.uid																									
+WHERE ab_test_name LIKE '%A/B%' -- restricts to variant 1																									
+AND test_control LIKE '%Control%'																									
+AND events.uid IN (SELECT uid FROM variants)																									
+AND abt > 3 -- ab group restriction																									
+AND b_reason IS NULL -- user is not banned																									
+AND (isdev IS NULL OR isdev = false)) -- account type is not a dev account																									
+																									
+,test_2 AS( -- Local currency																									
+SELECT events.uid																									
+,date(time) AS start_time																									
+,'VARIANT_2'AS test_control																									
+FROM events																									
+LEFT JOIN mistplayetl.users ON events.uid = users.uid																									
+WHERE ab_test_name LIKE '%A/B%' -- restricts to variant 2																									
+AND test_control LIKE '%Local%'																									
+AND events.uid IN (SELECT uid FROM variants)																									
+AND abt > 3 -- ab group restriction																									
+AND b_reason IS NULL -- user is not banned																									
+AND (isdev IS NULL OR isdev = false)) -- account type is not a dev account																									
+																									
+,non_spenders AS(																									
+(SELECT * FROM control)																									
+UNION																									
+(SELECT * FROM test_1)																									
+UNION																									
+(SELECT * FROM test_2))																									
+																									
+,spend AS( --table consisting of the aggregations for dx_iap (in-app purchases)																									
+SELECT test_control																									
+,COUNT(DISTINCT non_spenders.uid) AS users																									
+,COUNT(DISTINCT CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 AND amount > 0.5 THEN non_spenders.uid ELSE NULL END) AS d1_spenders																									
+,COUNT(DISTINCT CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 AND amount > 0.5 THEN non_spenders.uid ELSE NULL END) AS d3_spenders																									
+,COUNT(DISTINCT CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 7 AND amount > 0.5 THEN non_spenders.uid ELSE NULL END) AS d7_spenders																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) AS d1_iap																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) AS d3_iap																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 7 THEN amount ELSE 0 END) AS d7_iap																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 1 THEN amount ELSE 0 END) / COUNT(DISTINCT non_spenders.uid) AS d1_aspu																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 3 THEN amount ELSE 0 END) / COUNT(DISTINCT non_spenders.uid) AS d3_aspu																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(inapppurchases.date)) BETWEEN 0 AND 7 THEN amount ELSE 0 END) / COUNT(DISTINCT non_spenders.uid) AS d7_aspu																									
+FROM non_spenders																									
+LEFT JOIN mistplayetl.inapppurchases ON non_spenders.uid = inapppurchases.uid																									
+GROUP BY 1)																									
+																									
+,revenue AS(																									
+SELECT test_control																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '1' day THEN NULL WHEN Date_diff('day', date(start_time), date(installs.createdat)) BETWEEN 0 AND 1 THEN rev/100 ELSE 0 END) d1_rev																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '3' day THEN NULL WHEN Date_diff('day', date(start_time), date(installs.createdat)) BETWEEN 0 AND 3 THEN rev/100 ELSE 0 END) d3_rev																									
+,SUM(CASE WHEN date(start_time) > date(NOW()) - INTERVAL '7' day THEN NULL WHEN Date_diff('day', date(start_time), date(installs.createdat)) BETWEEN 0 AND 7 THEN rev/100 ELSE 0 END) d7_rev																									
+FROM non_spenders																									
+LEFT JOIN mistplayetl.installs ON non_spenders.uid = installs.uid AND state = 2																									
+GROUP BY 1)																									
+																									
+SELECT spend.test_control																									
+,spend.users																									
+,d1_spenders																									
+,d3_spenders																									
+,d7_spenders																									
+,d1_iap																									
+,d3_iap																									
+,d7_iap																									
+,d1_aspu																									
+,d3_aspu																									
+,d7_aspu																									
+,d1_rev																									
+,d3_rev																									
+,d7_rev																									
+FROM spend																									
+LEFT JOIN revenue ON spend.test_control = revenue.test_control																									
+ORDER BY 1																									
+																									
+-- FOR PN 2:																									
+---- ADD																									
+-- AND (abtest.name LIKE '%Spend $0.99 - 2%'																									
+-- OR message.campaign_name LIKE '%Spend $0.99 - 2%') -- users received PN 2																									
+---- REMOVE																									
+-- AND (abtest.name NOT LIKE '%Spend $0.99 - 2%'																									
+-- OR message.campaign_name NOT LIKE '%Spend $0.99 - 2%') -- user did not receive PN 2																									
+-- AND (abtest.name NOT LIKE '%Spend $0.99 - 3%'																									
+-- OR message.campaign_name NOT LIKE '%Spend $0.99 - 3%') -- user did not receive PN 3																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
+																									
